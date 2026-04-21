@@ -1,0 +1,36 @@
+seed: 537
+sample_rate: 16000
+clip_seconds: 4.0
+n_mels: 64
+n_fft: 1024
+hop_length: 256
+batch_size: 32
+num_workers: 0
+epochs: 8
+learning_rate: 0.001
+weight_decay: 0.0001
+val_fold: 10
+
+cloud_accuracy_boost: 0.18
+alert_payload_bytes: 64
+embedding_bytes: 256
+raw_audio_bytes_per_second: 32000
+
+initial_threshold: 0.72
+min_threshold: 0.45
+max_threshold: 0.95
+budget_upload_rate: 0.25
+adaptation_rate: 0.08
+sliding_window: 50
+
+priority_weights:
+  air_conditioner: 0.8
+  car_horn: 1.1
+  children_playing: 0.7
+  dog_bark: 1.0
+  drilling: 0.9
+  engine_idling: 0.7
+  gun_shot: 1.8
+  jackhammer: 1.0
+  siren: 1.7
+  street_music: 0.6
