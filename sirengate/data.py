@@ -99,6 +99,12 @@ class UrbanSoundDataset(Dataset):
 def load_urbansound_records(dataset_root: str | Path) -> List[ClipRecord]:
     dataset_root = Path(dataset_root)
     metadata_path = dataset_root / "metadata" / "UrbanSound8K.csv"
+    return load_records_from_metadata(dataset_root, metadata_path)
+
+
+def load_records_from_metadata(dataset_root: str | Path, metadata_path: str | Path) -> List[ClipRecord]:
+    dataset_root = Path(dataset_root)
+    metadata_path = Path(metadata_path)
     if not metadata_path.exists():
         raise FileNotFoundError(f"Could not find metadata file: {metadata_path}")
 
@@ -121,6 +127,43 @@ def load_urbansound_records(dataset_root: str | Path) -> List[ClipRecord]:
                 label_name=label_name,
                 fold=fold,
                 clip_id=fname,
+            )
+        )
+
+    return records
+
+
+def load_records_from_manifest(manifest_path: str | Path) -> List[ClipRecord]:
+    manifest_path = Path(manifest_path)
+    if not manifest_path.exists():
+        raise FileNotFoundError(f"Could not find manifest file: {manifest_path}")
+
+    df = pd.read_csv(manifest_path)
+    required_cols = {"path", "label"}
+    missing_cols = required_cols - set(df.columns)
+    if missing_cols:
+        raise ValueError(f"Manifest missing required columns: {sorted(missing_cols)}")
+
+    records: List[ClipRecord] = []
+    for idx, row in df.iterrows():
+        label_name = str(row["label"])
+        if label_name not in CLASS_TO_IDX:
+            continue
+
+        clip_path = Path(str(row["path"])).expanduser()
+        if not clip_path.is_absolute():
+            clip_path = (manifest_path.parent / clip_path).resolve()
+
+        fold = int(row["fold"]) if "fold" in df.columns and pd.notna(row["fold"]) else (idx % 10) + 1
+        clip_id = str(row["clip_id"]) if "clip_id" in df.columns and pd.notna(row["clip_id"]) else clip_path.name
+
+        records.append(
+            ClipRecord(
+                path=str(clip_path),
+                label_idx=CLASS_TO_IDX[label_name],
+                label_name=label_name,
+                fold=fold,
+                clip_id=clip_id,
             )
         )
 

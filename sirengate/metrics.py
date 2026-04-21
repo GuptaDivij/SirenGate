@@ -49,3 +49,30 @@ def weighted_event_score(y_true: Iterable[int], y_pred: Iterable[int], class_wei
         score += w * (1.0 if int(yt) == int(yp) else 0.0)
 
     return float(score / max(total_weight, 1e-8))
+
+
+def weighted_precision_recall_f1(
+    y_true: Iterable[int],
+    y_pred: Iterable[int],
+    class_weights: Dict[int, float],
+    labels: List[int],
+) -> Dict[str, float]:
+    y_true = np.asarray(list(y_true))
+    y_pred = np.asarray(list(y_pred))
+
+    precisions, recalls, f1s, _ = precision_recall_fscore_support(
+        y_true,
+        y_pred,
+        labels=labels,
+        average=None,
+        zero_division=0,
+    )
+
+    weights = np.asarray([float(class_weights.get(int(label), 1.0)) for label in labels], dtype=np.float64)
+    denom = float(weights.sum()) if float(weights.sum()) > 0 else 1.0
+
+    return {
+        "priority_weighted_precision": float(np.dot(precisions, weights) / denom),
+        "priority_weighted_recall": float(np.dot(recalls, weights) / denom),
+        "priority_weighted_f1": float(np.dot(f1s, weights) / denom),
+    }

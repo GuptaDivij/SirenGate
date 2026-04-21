@@ -9,7 +9,13 @@ from torch.utils.data import DataLoader, random_split
 
 from .calibration import TemperatureScaler
 from .config import Config
-from .data import SyntheticStreamingDataset, UrbanSoundDataset, load_urbansound_records, split_records_by_fold
+from .data import (
+    SyntheticStreamingDataset,
+    UrbanSoundDataset,
+    load_records_from_manifest,
+    load_urbansound_records,
+    split_records_by_fold,
+)
 from .models import SmallAudioCNN, collect_logits, train_model
 from .plots import plot_threshold_trace, plot_tradeoff
 from .simulation import evaluate_policies_from_logits
@@ -21,9 +27,18 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("command", choices=["demo", "train", "simulate"])
     parser.add_argument("--config", default="configs/default.yaml")
     parser.add_argument("--dataset-root", default=None)
+    parser.add_argument("--manifest", default=None)
     parser.add_argument("--output-dir", default="results/run")
     parser.add_argument("--checkpoint", default=None)
     return parser
+
+
+def load_records(dataset_root: str | None = None, manifest: str | None = None):
+    if manifest:
+        return load_records_from_manifest(manifest)
+    if dataset_root:
+        return load_urbansound_records(dataset_root)
+    raise SystemExit("Either --dataset-root or --manifest is required")
 
 
 def run_demo(config: Config, output_dir: Path) -> None:
@@ -70,7 +85,7 @@ def run_demo(config: Config, output_dir: Path) -> None:
     )
 
     plot_tradeoff(output_dir / "policy_summary.csv", output_dir / "bandwidth_vs_f1.png")
-    plot_threshold_trace(output_dir / "events_adaptive_threshold.csv", output_dir / "adaptive_threshold_trace.png")
+    plot_threshold_trace(output_dir / "events_adaptive_triage.csv", output_dir / "adaptive_threshold_trace.png")
 
     save_json(
         {
@@ -84,8 +99,8 @@ def run_demo(config: Config, output_dir: Path) -> None:
     )
 
 
-def run_train(config: Config, dataset_root: str, output_dir: Path) -> None:
-    records = load_urbansound_records(dataset_root)
+def run_train(config: Config, dataset_root: str | None, manifest: str | None, output_dir: Path) -> None:
+    records = load_records(dataset_root, manifest)
     train_records, val_records = split_records_by_fold(records, config.val_fold)
 
     train_ds = UrbanSoundDataset(
@@ -136,13 +151,14 @@ def run_train(config: Config, dataset_root: str, output_dir: Path) -> None:
             "best_val_accuracy": artifacts.val_accuracy,
             "temperature": scaler.temperature,
             "dataset_root": dataset_root,
+            "manifest": manifest,
         },
         output_dir / "train_summary.json",
     )
 
 
-def run_simulate(config: Config, dataset_root: str, checkpoint: str, output_dir: Path) -> None:
-    records = load_urbansound_records(dataset_root)
+def run_simulate(config: Config, dataset_root: str | None, manifest: str | None, checkpoint: str, output_dir: Path) -> None:
+    records = load_records(dataset_root, manifest)
     _, val_records = split_records_by_fold(records, config.val_fold)
 
     val_ds = UrbanSoundDataset(
@@ -175,12 +191,14 @@ def run_simulate(config: Config, dataset_root: str, checkpoint: str, output_dir:
     )
 
     plot_tradeoff(output_dir / "policy_summary.csv", output_dir / "bandwidth_vs_f1.png")
-    plot_threshold_trace(output_dir / "events_adaptive_threshold.csv", output_dir / "adaptive_threshold_trace.png")
+    plot_threshold_trace(output_dir / "events_adaptive_triage.csv", output_dir / "adaptive_threshold_trace.png")
 
     save_json(
         {
             "checkpoint": checkpoint,
             "temperature": scaler.temperature,
+            "dataset_root": dataset_root,
+            "manifest": manifest,
             "policies": {k: v.summary for k, v in results.items()},
         },
         output_dir / "simulation_summary.json",
@@ -199,14 +217,14 @@ def main() -> None:
         run_demo(config, output_dir)
 
     elif args.command == "train":
-        if not args.dataset_root:
-            raise SystemExit("--dataset-root is required for train")
-        run_train(config, args.dataset_root, output_dir)
+        if not args.dataset_root and not args.manifest:
+            raise SystemExit("--dataset-root or --manifest is required for train")
+        run_train(config, args.dataset_root, args.manifest, output_dir)
 
     elif args.command == "simulate":
-        if not args.dataset_root or not args.checkpoint:
-            raise SystemExit("--dataset-root and --checkpoint are required for simulate")
-        run_simulate(config, args.dataset_root, args.checkpoint, output_dir)
+        if (not args.dataset_root and not args.manifest) or not args.checkpoint:
+            raise SystemExit("--checkpoint and either --dataset-root or --manifest are required for simulate")
+        run_simulate(config, args.dataset_root, args.manifest, args.checkpoint, output_dir)
 
 
 if __name__ == "__main__":

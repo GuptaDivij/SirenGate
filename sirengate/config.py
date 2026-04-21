@@ -24,20 +24,27 @@ class Config:
 
     # Simulation / middleware
     cloud_accuracy_boost: float = 0.18
+    embedding_accuracy_boost: float = 0.08
     alert_payload_bytes: int = 64
     embedding_bytes: int = 256
     raw_audio_bytes_per_second: int = 32000
 
     # Adaptive policy
     initial_threshold: float = 0.72
+    initial_margin_threshold: float = 0.18
     min_threshold: float = 0.45
     max_threshold: float = 0.95
+    min_margin_threshold: float = 0.05
+    max_margin_threshold: float = 0.35
     budget_upload_rate: float = 0.25
+    budget_embedding_rate: float = 0.35
     adaptation_rate: float = 0.08
     sliding_window: int = 50
+    target_edge_accuracy: float = 0.80
 
     # Class importance
     priority_weights: Dict[str, float] | None = None
+    false_positive_costs: Dict[str, float] | None = None
 
     @classmethod
     def from_yaml(cls, path: str | Path) -> "Config":
