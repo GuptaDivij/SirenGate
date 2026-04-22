@@ -95,13 +95,13 @@ class AdaptiveRouter:
         embedding_budget_error = embedding_rate - self.budget_embedding_rate
         acc_error = self.target_edge_accuracy - edge_acc
 
-        # If cloud use is too high, demand lower confidence before escalating to raw audio.
-        self.threshold += self.adaptation_rate * cloud_budget_error
+        # Too much cloud traffic should make raw-audio escalation harder.
+        self.threshold -= self.adaptation_rate * cloud_budget_error
 
-        # If edge accuracy is weak, escalate more examples.
-        self.threshold -= 0.5 * self.adaptation_rate * acc_error
-        self.margin_threshold += 0.5 * self.adaptation_rate * embedding_budget_error
-        self.margin_threshold -= 0.25 * self.adaptation_rate * acc_error
+        # If edge accuracy is weak, widen the set of clips that get extra review.
+        self.threshold += 0.5 * self.adaptation_rate * acc_error
+        self.margin_threshold -= 0.5 * self.adaptation_rate * embedding_budget_error
+        self.margin_threshold += 0.25 * self.adaptation_rate * acc_error
 
         self.threshold = max(self.min_threshold, min(self.max_threshold, self.threshold))
         self.margin_threshold = max(self.min_margin_threshold, min(self.max_margin_threshold, self.margin_threshold))

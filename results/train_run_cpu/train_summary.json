@@ -1,0 +1,7 @@
+{
+  "best_model_path": "results/train_run_cpu/best_model.pt",
+  "best_val_accuracy": 0.4755077658303465,
+  "temperature": 1.1805775165557861,
+  "dataset_root": "UrbanSound8K",
+  "manifest": null
+}

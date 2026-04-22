@@ -1,0 +1,5 @@
+UrbanSound8K/
+results/
+__pycache__/
+sirengate/__pycache__/
+.DS_Store

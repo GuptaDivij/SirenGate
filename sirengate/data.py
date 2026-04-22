@@ -4,9 +4,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import List, Tuple
 
-import librosa
 import numpy as np
 import pandas as pd
+from scipy.io import wavfile
+from scipy.signal import get_window, resample_poly, stft
 import torch
 from torch.utils.data import Dataset
 
@@ -20,6 +21,14 @@ class ClipRecord:
     label_name: str
     fold: int
     clip_id: str
+
+
+def is_audio_readable(path: str | Path) -> bool:
+    try:
+        wavfile.read(path)
+        return True
+    except Exception:
+        return False
 
 
 class UrbanSoundDataset(Dataset):
@@ -45,7 +54,19 @@ class UrbanSoundDataset(Dataset):
         return len(self.records)
 
     def _load_audio(self, path: str) -> np.ndarray:
-        y, _ = librosa.load(path, sr=self.sample_rate, mono=True)
+        sample_rate, y = wavfile.read(path)
+        y = np.asarray(y)
+
+        if y.ndim == 2:
+            y = y.mean(axis=1)
+
+        if np.issubdtype(y.dtype, np.integer):
+            y = y.astype(np.float32) / max(np.iinfo(y.dtype).max, 1)
+        else:
+            y = y.astype(np.float32)
+
+        if sample_rate != self.sample_rate:
+            y = resample_poly(y, self.sample_rate, sample_rate).astype(np.float32)
 
         if len(y) < self.clip_samples:
             y = np.pad(y, (0, self.clip_samples - len(y)))
@@ -71,16 +92,24 @@ class UrbanSoundDataset(Dataset):
         return np.clip(y, -1.0, 1.0)
 
     def _log_mel(self, y: np.ndarray) -> np.ndarray:
-        mel = librosa.feature.melspectrogram(
-            y=y,
-            sr=self.sample_rate,
-            n_fft=self.n_fft,
-            hop_length=self.hop_length,
-            n_mels=self.n_mels,
+        _, _, zxx = stft(
+            y,
+            fs=self.sample_rate,
+            window=get_window("hann", self.n_fft, fftbins=True),
+            nperseg=self.n_fft,
+            noverlap=self.n_fft - self.hop_length,
+            boundary=None,
+            padded=False,
         )
-        mel_db = librosa.power_to_db(mel, ref=np.max)
-        mel_db = (mel_db - mel_db.mean()) / (mel_db.std() + 1e-6)
-        return mel_db.astype(np.float32)
+        spec = np.abs(zxx) ** 2
+
+        if spec.shape[0] < self.n_mels:
+            spec = np.pad(spec, ((0, self.n_mels - spec.shape[0]), (0, 0)))
+
+        mel_like = spec[: self.n_mels]
+        mel_like = np.log(mel_like + 1e-6)
+        mel_like = (mel_like - mel_like.mean()) / (mel_like.std() + 1e-6)
+        return mel_like.astype(np.float32)
 
     def __getitem__(self, idx: int) -> dict:
         record = self.records[idx]
@@ -96,13 +125,17 @@ class UrbanSoundDataset(Dataset):
         }
 
 
-def load_urbansound_records(dataset_root: str | Path) -> List[ClipRecord]:
+def load_urbansound_records(dataset_root: str | Path, skip_unreadable: bool = True) -> List[ClipRecord]:
     dataset_root = Path(dataset_root)
     metadata_path = dataset_root / "metadata" / "UrbanSound8K.csv"
-    return load_records_from_metadata(dataset_root, metadata_path)
+    return load_records_from_metadata(dataset_root, metadata_path, skip_unreadable=skip_unreadable)
 
 
-def load_records_from_metadata(dataset_root: str | Path, metadata_path: str | Path) -> List[ClipRecord]:
+def load_records_from_metadata(
+    dataset_root: str | Path,
+    metadata_path: str | Path,
+    skip_unreadable: bool = True,
+) -> List[ClipRecord]:
     dataset_root = Path(dataset_root)
     metadata_path = Path(metadata_path)
     if not metadata_path.exists():
@@ -119,6 +152,8 @@ def load_records_from_metadata(dataset_root: str | Path, metadata_path: str | Pa
         fold = int(row["fold"])
         fname = row["slice_file_name"]
         path = dataset_root / "audio" / f"fold{fold}" / fname
+        if skip_unreadable and not is_audio_readable(path):
+            continue
 
         records.append(
             ClipRecord(
@@ -133,7 +168,7 @@ def load_records_from_metadata(dataset_root: str | Path, metadata_path: str | Pa
     return records
 
 
-def load_records_from_manifest(manifest_path: str | Path) -> List[ClipRecord]:
+def load_records_from_manifest(manifest_path: str | Path, skip_unreadable: bool = True) -> List[ClipRecord]:
     manifest_path = Path(manifest_path)
     if not manifest_path.exists():
         raise FileNotFoundError(f"Could not find manifest file: {manifest_path}")
@@ -153,6 +188,8 @@ def load_records_from_manifest(manifest_path: str | Path) -> List[ClipRecord]:
         clip_path = Path(str(row["path"])).expanduser()
         if not clip_path.is_absolute():
             clip_path = (manifest_path.parent / clip_path).resolve()
+        if skip_unreadable and not is_audio_readable(clip_path):
+            continue
 
         fold = int(row["fold"]) if "fold" in df.columns and pd.notna(row["fold"]) else (idx % 10) + 1
         clip_id = str(row["clip_id"]) if "clip_id" in df.columns and pd.notna(row["clip_id"]) else clip_path.name

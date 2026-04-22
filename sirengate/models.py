@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+from collections import Counter
 from typing import Dict, List
 
 import numpy as np
@@ -90,7 +91,23 @@ def train_model(
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    criterion = nn.CrossEntropyLoss()
+    class_counts = Counter()
+    dataset = getattr(train_loader, "dataset", None)
+    if dataset is not None and hasattr(dataset, "records"):
+        for record in dataset.records:
+            class_counts[int(record.label_idx)] += 1
+
+    if class_counts:
+        num_classes = model.classifier.out_features if hasattr(model, "classifier") else len(class_counts)
+        weights = []
+        total = sum(class_counts.values())
+        for class_idx in range(num_classes):
+            count = max(class_counts.get(class_idx, 1), 1)
+            weights.append(total / (num_classes * count))
+        criterion = nn.CrossEntropyLoss(weight=torch.tensor(weights, dtype=torch.float32, device=device))
+    else:
+        criterion = nn.CrossEntropyLoss()
+
     optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate, weight_decay=weight_decay)
 
     best_acc = -1.0
@@ -139,6 +156,11 @@ def train_model(
             "val_accuracy": float(val_acc),
         }
         history.append(row)
+        print(
+            f"epoch={epoch} train_loss={row['train_loss']:.4f} "
+            f"train_acc={row['train_accuracy']:.4f} val_acc={row['val_accuracy']:.4f}",
+            flush=True,
+        )
 
         if val_acc > best_acc:
             best_acc = val_acc
