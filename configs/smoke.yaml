@@ -4,6 +4,7 @@ clip_seconds: 4.0
 n_mels: 64
 n_fft: 1024
 hop_length: 256
+embedding_dim: 128
 batch_size: 64
 num_workers: 0
 epochs: 1
@@ -12,22 +13,31 @@ weight_decay: 0.0001
 val_fold: 10
 
 cloud_accuracy_boost: 0.18
-embedding_accuracy_boost: 0.08
 alert_payload_bytes: 64
 embedding_bytes: 256
 raw_audio_bytes_per_second: 32000
 
-initial_threshold: 0.72
-initial_margin_threshold: 0.18
-min_threshold: 0.45
+initial_threshold: 0.55
+min_threshold: 0.30
 max_threshold: 0.95
-min_margin_threshold: 0.05
-max_margin_threshold: 0.35
-budget_upload_rate: 0.25
-budget_embedding_rate: 0.35
-adaptation_rate: 0.08
+budget_upload_rate: 0.40
+adaptation_rate: 0.06
 sliding_window: 50
 target_edge_accuracy: 0.80
+
+embedding_band_width: 0.15
+min_top2_margin_for_alert: 0.10
+margin_penalty_strength: 0.08
+
+embedding_cloud_accuracy_boost: 0.08
+raw_cloud_accuracy_boost: 0.18
+
+threshold_sweep:
+  - 0.35
+  - 0.45
+  - 0.55
+  - 0.65
+  - 0.75
 
 priority_weights:
   air_conditioner: 0.8

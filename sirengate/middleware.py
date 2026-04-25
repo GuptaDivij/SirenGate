@@ -9,99 +9,113 @@ from typing import Deque, Dict
 class RoutingDecision:
     route: str
     threshold_used: float
-    margin_threshold_used: float
+    raw_threshold_used: float
     transmitted_bytes: int
     used_cloud: bool
-    sent_embedding: bool
 
 
 @dataclass
 class AdaptiveRouter:
+    """
+    Adaptive Edge-AI router.
+
+    Routes:
+    - alert_only: high-confidence local prediction, send tiny JSON alert.
+    - embedding: medium-confidence uncertainty, send compact embedding for cloud verification.
+    - raw_audio: low-confidence or high-risk uncertainty, send full raw audio to cloud.
+
+    The adaptive threshold changes online using a sliding window:
+    - If bandwidth usage is too high, it lowers the escalation threshold.
+    - If recent edge accuracy is too weak, it raises the escalation threshold.
+    """
+
     alert_payload_bytes: int
     embedding_bytes: int
     raw_audio_bytes_per_second: int
     clip_seconds: float
+
     initial_threshold: float
-    initial_margin_threshold: float
     min_threshold: float
     max_threshold: float
-    min_margin_threshold: float
-    max_margin_threshold: float
     budget_upload_rate: float
-    budget_embedding_rate: float
     adaptation_rate: float
     sliding_window: int
     target_edge_accuracy: float
+
+    embedding_band_width: float = 0.15
+    min_top2_margin_for_alert: float = 0.10
+    margin_penalty_strength: float = 0.08
+
     priority_weights: Dict[str, float] = field(default_factory=dict)
     false_positive_costs: Dict[str, float] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
-        self.threshold = self.initial_threshold
-        self.margin_threshold = self.initial_margin_threshold
-        self.recent_cloud_uploads: Deque[int] = deque(maxlen=self.sliding_window)
-        self.recent_embedding_uploads: Deque[int] = deque(maxlen=self.sliding_window)
+        self.threshold = float(self.initial_threshold)
+        self.recent_bandwidth_fraction: Deque[float] = deque(maxlen=self.sliding_window)
         self.recent_correctness: Deque[int] = deque(maxlen=self.sliding_window)
 
     @property
     def raw_clip_bytes(self) -> int:
         return int(self.raw_audio_bytes_per_second * self.clip_seconds)
 
-    def decide(self, confidence: float, margin: float, predicted_label: str) -> RoutingDecision:
+    def _effective_alert_threshold(self, predicted_label: str, top2_margin: float) -> float:
         priority = float(self.priority_weights.get(predicted_label, 1.0))
         fp_cost = float(self.false_positive_costs.get(predicted_label, priority))
 
-        # Higher-priority or high-false-positive-cost classes escalate more aggressively.
-        effective_threshold = min(self.max_threshold, self.threshold + 0.07 * (priority - 1.0) + 0.04 * (fp_cost - 1.0))
-        effective_margin = min(
-            self.max_margin_threshold,
-            max(self.min_margin_threshold, self.margin_threshold + 0.03 * (priority - 1.0)),
-        )
+        # Higher-priority and high-false-positive-cost classes require stronger confidence
+        # before staying local. This directly handles classes like gun_shot and siren.
+        priority_penalty = 0.05 * (priority - 1.0)
+        fp_penalty = 0.03 * (fp_cost - 1.0)
 
-        if confidence < effective_threshold:
-            route = "raw_audio"
-            transmitted_bytes = self.raw_clip_bytes
-            use_cloud = True
-            sent_embedding = False
-        elif margin < effective_margin:
-            route = "embedding"
-            transmitted_bytes = self.alert_payload_bytes + self.embedding_bytes
-            use_cloud = False
-            sent_embedding = True
-        else:
+        # If the top two classes are close, the model is uncertain even if top softmax is high.
+        margin_gap = max(0.0, self.min_top2_margin_for_alert - float(top2_margin))
+        margin_penalty = self.margin_penalty_strength * margin_gap / max(self.min_top2_margin_for_alert, 1e-6)
+
+        threshold = self.threshold + priority_penalty + fp_penalty + margin_penalty
+        return max(self.min_threshold, min(self.max_threshold, threshold))
+
+    def decide(self, confidence: float, top2_margin: float, predicted_label: str) -> RoutingDecision:
+        alert_threshold = self._effective_alert_threshold(predicted_label, top2_margin)
+        raw_threshold = max(self.min_threshold, alert_threshold - self.embedding_band_width)
+
+        if confidence >= alert_threshold and top2_margin >= self.min_top2_margin_for_alert:
             route = "alert_only"
             transmitted_bytes = self.alert_payload_bytes
-            use_cloud = False
-            sent_embedding = False
+            used_cloud = False
+        elif confidence >= raw_threshold:
+            route = "embedding"
+            transmitted_bytes = self.embedding_bytes
+            used_cloud = True
+        else:
+            route = "raw_audio"
+            transmitted_bytes = self.raw_clip_bytes
+            used_cloud = True
 
         return RoutingDecision(
             route=route,
-            threshold_used=float(effective_threshold),
-            margin_threshold_used=float(effective_margin),
-            transmitted_bytes=transmitted_bytes,
-            used_cloud=use_cloud,
-            sent_embedding=sent_embedding,
+            threshold_used=float(alert_threshold),
+            raw_threshold_used=float(raw_threshold),
+            transmitted_bytes=int(transmitted_bytes),
+            used_cloud=bool(used_cloud),
         )
 
-    def update(self, route: str, edge_correct: bool) -> None:
-        self.recent_cloud_uploads.append(1 if route == "raw_audio" else 0)
-        self.recent_embedding_uploads.append(1 if route == "embedding" else 0)
+    def update(self, transmitted_bytes: int, edge_correct: bool) -> None:
+        # Normalize bytes against full raw upload cost.
+        bandwidth_fraction = float(transmitted_bytes) / max(float(self.raw_clip_bytes), 1.0)
+
+        self.recent_bandwidth_fraction.append(bandwidth_fraction)
         self.recent_correctness.append(1 if edge_correct else 0)
 
-        cloud_rate = sum(self.recent_cloud_uploads) / max(len(self.recent_cloud_uploads), 1)
-        embedding_rate = sum(self.recent_embedding_uploads) / max(len(self.recent_embedding_uploads), 1)
-        edge_acc = sum(self.recent_correctness) / max(len(self.recent_correctness), 1)
+        current_bandwidth_rate = sum(self.recent_bandwidth_fraction) / max(len(self.recent_bandwidth_fraction), 1)
+        current_edge_accuracy = sum(self.recent_correctness) / max(len(self.recent_correctness), 1)
 
-        cloud_budget_error = cloud_rate - self.budget_upload_rate
-        embedding_budget_error = embedding_rate - self.budget_embedding_rate
-        acc_error = self.target_edge_accuracy - edge_acc
+        budget_error = current_bandwidth_rate - self.budget_upload_rate
+        accuracy_error = self.target_edge_accuracy - current_edge_accuracy
 
-        # Too much cloud traffic should make raw-audio escalation harder.
-        self.threshold -= self.adaptation_rate * cloud_budget_error
+        # If bandwidth is too high, lower threshold so fewer samples escalate.
+        self.threshold -= self.adaptation_rate * budget_error
 
-        # If edge accuracy is weak, widen the set of clips that get extra review.
-        self.threshold += 0.5 * self.adaptation_rate * acc_error
-        self.margin_threshold -= 0.5 * self.adaptation_rate * embedding_budget_error
-        self.margin_threshold += 0.25 * self.adaptation_rate * acc_error
+        # If local model has been unreliable, raise threshold so more samples escalate.
+        self.threshold += 0.5 * self.adaptation_rate * accuracy_error
 
         self.threshold = max(self.min_threshold, min(self.max_threshold, self.threshold))
-        self.margin_threshold = max(self.min_margin_threshold, min(self.max_margin_threshold, self.margin_threshold))

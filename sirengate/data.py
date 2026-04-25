@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+import struct
 from typing import List, Tuple
 
 import numpy as np
@@ -14,6 +15,103 @@ from torch.utils.data import Dataset
 from .utils import CLASS_TO_IDX, IDX_TO_CLASS
 
 
+IMA_STEP_TABLE = [
+    7,
+    8,
+    9,
+    10,
+    11,
+    12,
+    13,
+    14,
+    16,
+    17,
+    19,
+    21,
+    23,
+    25,
+    28,
+    31,
+    34,
+    37,
+    41,
+    45,
+    50,
+    55,
+    60,
+    66,
+    73,
+    80,
+    88,
+    97,
+    107,
+    118,
+    130,
+    143,
+    157,
+    173,
+    190,
+    209,
+    230,
+    253,
+    279,
+    307,
+    337,
+    371,
+    408,
+    449,
+    494,
+    544,
+    598,
+    658,
+    724,
+    796,
+    876,
+    963,
+    1060,
+    1166,
+    1282,
+    1411,
+    1552,
+    1707,
+    1878,
+    2066,
+    2272,
+    2499,
+    2749,
+    3024,
+    3327,
+    3660,
+    4026,
+    4428,
+    4871,
+    5358,
+    5894,
+    6484,
+    7132,
+    7845,
+    8630,
+    9493,
+    10442,
+    11487,
+    12635,
+    13899,
+    15289,
+    16818,
+    18500,
+    20350,
+    22385,
+    24623,
+    27086,
+    29794,
+    32767,
+]
+
+IMA_INDEX_TABLE = [-1, -1, -1, -1, 2, 4, 6, 8, -1, -1, -1, -1, 2, 4, 6, 8]
+
+MS_ADAPTATION_TABLE = [230, 230, 230, 230, 307, 409, 512, 614, 768, 614, 512, 409, 307, 230, 230, 230]
+
+
 @dataclass
 class ClipRecord:
     path: str
@@ -21,14 +119,212 @@ class ClipRecord:
     label_name: str
     fold: int
     clip_id: str
+    salience: int | None = None
+    duration_seconds: float | None = None
+
+
+@dataclass
+class WaveInfo:
+    format_tag: int
+    channels: int
+    sample_rate: int
+    byte_rate: int
+    block_align: int
+    bits_per_sample: int
+    samples_per_block: int | None
+    fact_samples: int | None
+    coefficients: list[tuple[int, int]]
+    data: bytes
+
+
+def _clamp_int16(value: int) -> int:
+    return max(-32768, min(32767, value))
+
+
+def _parse_wave_file(path: str | Path) -> WaveInfo:
+    with Path(path).open("rb") as f:
+        blob = f.read()
+
+    if blob[:4] != b"RIFF" or blob[8:12] != b"WAVE":
+        raise ValueError(f"Unsupported audio container: {path}")
+
+    chunks: dict[bytes, bytes] = {}
+    offset = 12
+    while offset + 8 <= len(blob):
+        chunk_id = blob[offset : offset + 4]
+        chunk_size = struct.unpack_from("<I", blob, offset + 4)[0]
+        offset += 8
+        chunks[chunk_id] = blob[offset : offset + chunk_size]
+        offset += chunk_size + (chunk_size % 2)
+
+    fmt_chunk = chunks.get(b"fmt ")
+    data_chunk = chunks.get(b"data")
+    if fmt_chunk is None or data_chunk is None:
+        raise ValueError(f"Missing fmt/data chunks: {path}")
+
+    format_tag, channels, sample_rate, byte_rate, block_align, bits_per_sample = struct.unpack_from(
+        "<HHIIHH",
+        fmt_chunk,
+        0,
+    )
+    cb_size = struct.unpack_from("<H", fmt_chunk, 16)[0] if len(fmt_chunk) >= 18 else 0
+    fact_chunk = chunks.get(b"fact")
+    fact_samples = struct.unpack_from("<I", fact_chunk, 0)[0] if fact_chunk and len(fact_chunk) >= 4 else None
+
+    samples_per_block: int | None = None
+    coefficients: list[tuple[int, int]] = []
+
+    if format_tag == 0x0011 and cb_size >= 2 and len(fmt_chunk) >= 20:
+        samples_per_block = struct.unpack_from("<H", fmt_chunk, 18)[0]
+    elif format_tag == 0x0002 and cb_size >= 4 and len(fmt_chunk) >= 22:
+        samples_per_block = struct.unpack_from("<H", fmt_chunk, 18)[0]
+        num_coefficients = struct.unpack_from("<H", fmt_chunk, 20)[0]
+        coeff_offset = 22
+        for _ in range(num_coefficients):
+            if coeff_offset + 4 > len(fmt_chunk):
+                break
+            coefficients.append(struct.unpack_from("<hh", fmt_chunk, coeff_offset))
+            coeff_offset += 4
+
+    return WaveInfo(
+        format_tag=format_tag,
+        channels=channels,
+        sample_rate=sample_rate,
+        byte_rate=byte_rate,
+        block_align=block_align,
+        bits_per_sample=bits_per_sample,
+        samples_per_block=samples_per_block,
+        fact_samples=fact_samples,
+        coefficients=coefficients,
+        data=data_chunk,
+    )
 
 
 def is_audio_readable(path: str | Path) -> bool:
     try:
-        wavfile.read(path)
-        return True
+        info = _parse_wave_file(path)
     except Exception:
         return False
+
+    if info.format_tag in (0x0001, 0x0003, 0xFFFE):
+        return True
+    if info.channels != 1:
+        return False
+    return info.format_tag in (0x0002, 0x0011)
+
+
+def _decode_ima_adpcm_mono(info: WaveInfo) -> np.ndarray:
+    samples: list[int] = []
+    block_align = max(info.block_align, 1)
+
+    for start in range(0, len(info.data), block_align):
+        block = info.data[start : start + block_align]
+        if len(block) < 4:
+            continue
+
+        predictor = struct.unpack_from("<h", block, 0)[0]
+        index = max(0, min(88, block[2]))
+
+        for byte in block[4:]:
+            for nibble in (byte & 0x0F, byte >> 4):
+                step = IMA_STEP_TABLE[index]
+                diff = step >> 3
+                if nibble & 1:
+                    diff += step >> 2
+                if nibble & 2:
+                    diff += step >> 1
+                if nibble & 4:
+                    diff += step
+                predictor = predictor - diff if nibble & 8 else predictor + diff
+                predictor = _clamp_int16(predictor)
+                index = max(0, min(88, index + IMA_INDEX_TABLE[nibble]))
+                samples.append(predictor)
+
+    pcm = np.asarray(samples, dtype=np.int16)
+    if info.fact_samples is not None:
+        pcm = pcm[: info.fact_samples]
+    return pcm
+
+
+def _decode_ms_adpcm_mono(info: WaveInfo) -> np.ndarray:
+    if not info.coefficients:
+        raise ValueError("Missing coefficient table for MS ADPCM decoding")
+
+    samples: list[int] = []
+    block_align = max(info.block_align, 1)
+
+    for start in range(0, len(info.data), block_align):
+        block = info.data[start : start + block_align]
+        if len(block) < 7:
+            continue
+
+        predictor_idx = min(block[0], len(info.coefficients) - 1)
+        coeff1, coeff2 = info.coefficients[predictor_idx]
+        delta = max(16, struct.unpack_from("<H", block, 1)[0])
+        sample1 = struct.unpack_from("<h", block, 3)[0]
+        sample2 = struct.unpack_from("<h", block, 5)[0]
+
+        samples.extend([sample2, sample1])
+
+        for byte in block[7:]:
+            for nibble in (byte >> 4, byte & 0x0F):
+                signed_nibble = nibble if nibble < 8 else nibble - 16
+                predictor = ((sample1 * coeff1) + (sample2 * coeff2)) // 256 + signed_nibble * delta
+                predictor = _clamp_int16(predictor)
+                samples.append(predictor)
+                sample2, sample1 = sample1, predictor
+                delta = (MS_ADAPTATION_TABLE[nibble] * delta) // 256
+                delta = max(16, delta)
+
+    pcm = np.asarray(samples, dtype=np.int16)
+    if info.fact_samples is not None:
+        pcm = pcm[: info.fact_samples]
+    return pcm
+
+
+def read_audio(path: str | Path) -> tuple[int, np.ndarray]:
+    try:
+        sample_rate, y = wavfile.read(path)
+        return int(sample_rate), np.asarray(y)
+    except ValueError:
+        info = _parse_wave_file(path)
+        if info.channels != 1:
+            raise ValueError(f"Only mono ADPCM WAV files are supported: {path}")
+        if info.format_tag == 0x0011:
+            return info.sample_rate, _decode_ima_adpcm_mono(info)
+        if info.format_tag == 0x0002:
+            return info.sample_rate, _decode_ms_adpcm_mono(info)
+        raise
+
+
+def summarize_urbansound_dataset(dataset_root: str | Path) -> dict:
+    dataset_root = Path(dataset_root)
+    metadata_path = dataset_root / "metadata" / "UrbanSound8K.csv"
+    df = pd.read_csv(metadata_path)
+
+    unreadable = []
+    for _, row in df.iterrows():
+        clip_path = dataset_root / "audio" / f"fold{int(row['fold'])}" / row["slice_file_name"]
+        if not is_audio_readable(clip_path):
+            unreadable.append(row["slice_file_name"])
+
+    durations = df["end"] - df["start"]
+    return {
+        "dataset_root": str(dataset_root),
+        "total_clips": int(len(df)),
+        "usable_clips": int(len(df) - len(unreadable)),
+        "skipped_clips": int(len(unreadable)),
+        "unreadable_examples": unreadable[:10],
+        "class_counts": df["class"].value_counts().sort_index().to_dict(),
+        "salience_counts": df["salience"].value_counts().sort_index().to_dict(),
+        "fold_counts": df["fold"].value_counts().sort_index().to_dict(),
+        "duration_seconds": {
+            "min": float(durations.min()),
+            "mean": float(durations.mean()),
+            "median": float(durations.median()),
+            "max": float(durations.max()),
+        },
+    }
 
 
 class UrbanSoundDataset(Dataset):
@@ -49,19 +345,25 @@ class UrbanSoundDataset(Dataset):
         self.n_fft = n_fft
         self.hop_length = hop_length
         self.augment = augment
+        self.mel_filter = self._build_mel_filterbank()
 
     def __len__(self) -> int:
         return len(self.records)
 
     def _load_audio(self, path: str) -> np.ndarray:
-        sample_rate, y = wavfile.read(path)
+        sample_rate, y = read_audio(path)
         y = np.asarray(y)
 
         if y.ndim == 2:
             y = y.mean(axis=1)
 
-        if np.issubdtype(y.dtype, np.integer):
-            y = y.astype(np.float32) / max(np.iinfo(y.dtype).max, 1)
+        if np.issubdtype(y.dtype, np.unsignedinteger):
+            max_value = float(np.iinfo(y.dtype).max)
+            y = (y.astype(np.float32) - max_value / 2.0) / max(max_value / 2.0, 1.0)
+        elif np.issubdtype(y.dtype, np.signedinteger):
+            info = np.iinfo(y.dtype)
+            scale = float(max(info.max, -info.min))
+            y = y.astype(np.float32) / max(scale, 1.0)
         else:
             y = y.astype(np.float32)
 
@@ -83,13 +385,48 @@ class UrbanSoundDataset(Dataset):
         return y.astype(np.float32)
 
     def _augment(self, y: np.ndarray) -> np.ndarray:
-        noise_scale = np.random.uniform(0.0, 0.01)
+        if np.random.rand() < 0.6:
+            shift = int(np.random.randint(-self.sample_rate // 8, self.sample_rate // 8 + 1))
+            y = np.roll(y, shift)
+
+        noise_scale = float(np.random.uniform(0.0, 0.01))
         y = y + np.random.normal(0.0, noise_scale, size=y.shape).astype(np.float32)
 
-        gain = np.random.uniform(0.9, 1.1)
+        gain = float(np.random.uniform(0.85, 1.15))
         y = y * gain
 
         return np.clip(y, -1.0, 1.0)
+
+    def _hz_to_mel(self, hz: np.ndarray) -> np.ndarray:
+        return 2595.0 * np.log10(1.0 + hz / 700.0)
+
+    def _mel_to_hz(self, mel: np.ndarray) -> np.ndarray:
+        return 700.0 * (10 ** (mel / 2595.0) - 1.0)
+
+    def _build_mel_filterbank(self) -> np.ndarray:
+        n_freqs = self.n_fft // 2 + 1
+        mel_min = self._hz_to_mel(np.asarray([0.0]))[0]
+        mel_max = self._hz_to_mel(np.asarray([self.sample_rate / 2.0]))[0]
+        mel_points = np.linspace(mel_min, mel_max, self.n_mels + 2)
+        hz_points = self._mel_to_hz(mel_points)
+        bin_points = np.floor((self.n_fft + 1) * hz_points / self.sample_rate).astype(int)
+        bin_points = np.clip(bin_points, 0, n_freqs - 1)
+
+        filters = np.zeros((self.n_mels, n_freqs), dtype=np.float32)
+        for mel_idx in range(self.n_mels):
+            left, center, right = bin_points[mel_idx : mel_idx + 3]
+            if center <= left:
+                center = min(left + 1, n_freqs - 1)
+            if right <= center:
+                right = min(center + 1, n_freqs)
+
+            for freq_idx in range(left, center):
+                filters[mel_idx, freq_idx] = (freq_idx - left) / max(center - left, 1)
+            for freq_idx in range(center, right):
+                filters[mel_idx, freq_idx] = (right - freq_idx) / max(right - center, 1)
+
+        filters /= np.maximum(filters.sum(axis=1, keepdims=True), 1e-8)
+        return filters
 
     def _log_mel(self, y: np.ndarray) -> np.ndarray:
         _, _, zxx = stft(
@@ -101,15 +438,11 @@ class UrbanSoundDataset(Dataset):
             boundary=None,
             padded=False,
         )
-        spec = np.abs(zxx) ** 2
-
-        if spec.shape[0] < self.n_mels:
-            spec = np.pad(spec, ((0, self.n_mels - spec.shape[0]), (0, 0)))
-
-        mel_like = spec[: self.n_mels]
-        mel_like = np.log(mel_like + 1e-6)
-        mel_like = (mel_like - mel_like.mean()) / (mel_like.std() + 1e-6)
-        return mel_like.astype(np.float32)
+        power_spec = np.abs(zxx) ** 2
+        mel = self.mel_filter @ power_spec
+        mel = np.log(mel + 1e-6)
+        mel = (mel - mel.mean()) / (mel.std() + 1e-6)
+        return mel.astype(np.float32)
 
     def __getitem__(self, idx: int) -> dict:
         record = self.records[idx]
@@ -122,10 +455,11 @@ class UrbanSoundDataset(Dataset):
             "label_name": record.label_name,
             "audio_num_samples": len(y),
             "clip_id": record.clip_id,
+            "salience": record.salience if record.salience is not None else 0,
         }
 
 
-def load_urbansound_records(dataset_root: str | Path, skip_unreadable: bool = True) -> List[ClipRecord]:
+def load_urbansound_records(dataset_root: str | Path, skip_unreadable: bool = False) -> List[ClipRecord]:
     dataset_root = Path(dataset_root)
     metadata_path = dataset_root / "metadata" / "UrbanSound8K.csv"
     return load_records_from_metadata(dataset_root, metadata_path, skip_unreadable=skip_unreadable)
@@ -134,7 +468,7 @@ def load_urbansound_records(dataset_root: str | Path, skip_unreadable: bool = Tr
 def load_records_from_metadata(
     dataset_root: str | Path,
     metadata_path: str | Path,
-    skip_unreadable: bool = True,
+    skip_unreadable: bool = False,
 ) -> List[ClipRecord]:
     dataset_root = Path(dataset_root)
     metadata_path = Path(metadata_path)
@@ -145,15 +479,18 @@ def load_records_from_metadata(
     records: List[ClipRecord] = []
 
     for _, row in df.iterrows():
-        label_name = row["class"]
+        label_name = str(row["class"])
         if label_name not in CLASS_TO_IDX:
             continue
 
         fold = int(row["fold"])
-        fname = row["slice_file_name"]
+        fname = str(row["slice_file_name"])
         path = dataset_root / "audio" / f"fold{fold}" / fname
         if skip_unreadable and not is_audio_readable(path):
             continue
+
+        duration_seconds = float(row["end"] - row["start"]) if {"start", "end"}.issubset(df.columns) else None
+        salience = int(row["salience"]) if "salience" in df.columns and pd.notna(row["salience"]) else None
 
         records.append(
             ClipRecord(
@@ -162,13 +499,15 @@ def load_records_from_metadata(
                 label_name=label_name,
                 fold=fold,
                 clip_id=fname,
+                salience=salience,
+                duration_seconds=duration_seconds,
             )
         )
 
     return records
 
 
-def load_records_from_manifest(manifest_path: str | Path, skip_unreadable: bool = True) -> List[ClipRecord]:
+def load_records_from_manifest(manifest_path: str | Path, skip_unreadable: bool = False) -> List[ClipRecord]:
     manifest_path = Path(manifest_path)
     if not manifest_path.exists():
         raise FileNotFoundError(f"Could not find manifest file: {manifest_path}")
@@ -193,6 +532,7 @@ def load_records_from_manifest(manifest_path: str | Path, skip_unreadable: bool 
 
         fold = int(row["fold"]) if "fold" in df.columns and pd.notna(row["fold"]) else (idx % 10) + 1
         clip_id = str(row["clip_id"]) if "clip_id" in df.columns and pd.notna(row["clip_id"]) else clip_path.name
+        salience = int(row["salience"]) if "salience" in df.columns and pd.notna(row["salience"]) else None
 
         records.append(
             ClipRecord(
@@ -201,6 +541,8 @@ def load_records_from_manifest(manifest_path: str | Path, skip_unreadable: bool 
                 label_name=label_name,
                 fold=fold,
                 clip_id=clip_id,
+                salience=salience,
+                duration_seconds=None,
             )
         )
 
@@ -255,4 +597,5 @@ class SyntheticStreamingDataset(Dataset):
             "label_name": IDX_TO_CLASS[label],
             "audio_num_samples": 16000 * 4,
             "clip_id": f"synthetic_{idx}",
+            "salience": 1,
         }

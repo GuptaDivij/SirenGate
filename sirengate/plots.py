@@ -8,12 +8,13 @@ import pandas as pd
 
 def plot_tradeoff(summary_csv: str | Path, output_path: str | Path) -> None:
     df = pd.read_csv(summary_csv)
+    label_col = "policy" if "policy" in df.columns else "threshold"
 
     plt.figure(figsize=(8, 5))
     for _, row in df.iterrows():
         plt.scatter(row["avg_bytes_per_clip"], row["macro_f1"], s=80)
         plt.annotate(
-            row["policy"],
+            row[label_col],
             (row["avg_bytes_per_clip"], row["macro_f1"]),
             xytext=(5, 5),
             textcoords="offset points",

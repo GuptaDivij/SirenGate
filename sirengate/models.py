@@ -11,32 +11,36 @@ import torch.nn as nn
 from sklearn.metrics import accuracy_score
 from torch.utils.data import DataLoader
 
-
 class SmallAudioCNN(nn.Module):
     def __init__(self, num_classes: int = 10, embedding_dim: int = 128) -> None:
         super().__init__()
         self.features = nn.Sequential(
-            nn.Conv2d(1, 16, kernel_size=3, padding=1),
-            nn.BatchNorm2d(16),
+            nn.Conv2d(1, 24, kernel_size=3, padding=1),
+            nn.BatchNorm2d(24),
             nn.ReLU(),
             nn.MaxPool2d(2),
 
-            nn.Conv2d(16, 32, kernel_size=3, padding=1),
-            nn.BatchNorm2d(32),
+            nn.Conv2d(24, 48, kernel_size=3, padding=1),
+            nn.BatchNorm2d(48),
             nn.ReLU(),
             nn.MaxPool2d(2),
 
-            nn.Conv2d(32, 64, kernel_size=3, padding=1),
-            nn.BatchNorm2d(64),
+            nn.Conv2d(48, 96, kernel_size=3, padding=1),
+            nn.BatchNorm2d(96),
             nn.ReLU(),
+
+            nn.Conv2d(96, 96, kernel_size=3, padding=1),
+            nn.BatchNorm2d(96),
+            nn.ReLU(),
+
             nn.AdaptiveAvgPool2d((4, 4)),
         )
 
         self.embedding = nn.Sequential(
             nn.Flatten(),
-            nn.Linear(64 * 4 * 4, embedding_dim),
+            nn.Linear(96 * 4 * 4, embedding_dim),
             nn.ReLU(),
-            nn.Dropout(0.2),
+            nn.Dropout(0.3),
         )
 
         self.classifier = nn.Linear(embedding_dim, num_classes)
@@ -46,7 +50,6 @@ class SmallAudioCNN(nn.Module):
         emb = self.embedding(feats)
         logits = self.classifier(emb)
         return {"logits": logits, "embedding": emb}
-
 
 @dataclass
 class TrainArtifacts:
@@ -109,6 +112,14 @@ def train_model(
         criterion = nn.CrossEntropyLoss()
 
     optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate, weight_decay=weight_decay)
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+        optimizer,
+        mode="max",
+        factor=0.5,
+        patience=3,
+    )
+    early_stop_patience = 7
+    epochs_without_improvement = 0
 
     best_acc = -1.0
     best_model_path = output_dir / "best_model.pt"
@@ -162,9 +173,21 @@ def train_model(
             flush=True,
         )
 
+        scheduler.step(val_acc)
+
         if val_acc > best_acc:
             best_acc = val_acc
+            epochs_without_improvement = 0
             torch.save(model.state_dict(), best_model_path)
+        else:
+            epochs_without_improvement += 1
+
+        if epochs_without_improvement >= early_stop_patience:
+            print(
+                f"early stopping at epoch={epoch}; best_val_acc={best_acc:.4f}",
+                flush=True,
+            )
+            break
 
     return TrainArtifacts(
         best_model_path=str(best_model_path),
