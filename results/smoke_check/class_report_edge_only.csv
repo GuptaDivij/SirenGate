@@ -1,0 +1,11 @@
+policy,class_idx,class_name,priority_weight,support,tp,fp,fn,precision,recall,f1
+edge_only,0,air_conditioner,0.8,22,22,0,0,1.0,1.0,1.0
+edge_only,1,car_horn,1.1,20,20,0,0,1.0,1.0,1.0
+edge_only,2,children_playing,0.7,23,23,0,0,1.0,1.0,1.0
+edge_only,3,dog_bark,1.0,21,21,101,0,0.1721311475409836,1.0,0.2937062937062937
+edge_only,4,drilling,0.9,13,13,0,0,1.0,1.0,1.0
+edge_only,5,engine_idling,0.7,15,0,0,15,0.0,0.0,0.0
+edge_only,6,gun_shot,1.8,19,0,0,19,0.0,0.0,0.0
+edge_only,7,jackhammer,1.0,20,0,0,20,0.0,0.0,0.0
+edge_only,8,siren,1.7,21,0,0,21,0.0,0.0,0.0
+edge_only,9,street_music,0.6,26,0,0,26,0.0,0.0,0.0

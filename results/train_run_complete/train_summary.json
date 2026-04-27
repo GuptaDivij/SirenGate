@@ -1,0 +1,11 @@
+{
+  "best_model_path": "results/train_run_complete/best_model.pt",
+  "best_val_accuracy": 0.5758661887694145,
+  "temperature": 1.3676029443740845,
+  "dataset_root": "UrbanSound8K",
+  "manifest": null,
+  "num_train_clips": 7895,
+  "num_val_clips": 837,
+  "embedding_dim": 128,
+  "mean_embedding_l2": 17.902074813842773
+}

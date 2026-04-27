@@ -1,0 +1,52 @@
+{
+  "dataset_root": "UrbanSound8K",
+  "total_clips": 8732,
+  "usable_clips": 5979,
+  "skipped_clips": 2753,
+  "unreadable_examples": [
+    "101729-0-0-1.wav",
+    "101729-0-0-11.wav",
+    "101729-0-0-12.wav",
+    "101729-0-0-13.wav",
+    "101729-0-0-14.wav",
+    "101729-0-0-16.wav",
+    "101729-0-0-17.wav",
+    "101729-0-0-18.wav",
+    "101729-0-0-19.wav",
+    "101729-0-0-21.wav"
+  ],
+  "class_counts": {
+    "air_conditioner": 1000,
+    "car_horn": 429,
+    "children_playing": 1000,
+    "dog_bark": 1000,
+    "drilling": 1000,
+    "engine_idling": 1000,
+    "gun_shot": 374,
+    "jackhammer": 1000,
+    "siren": 929,
+    "street_music": 1000
+  },
+  "salience_counts": {
+    "1": 5702,
+    "2": 3030
+  },
+  "fold_counts": {
+    "1": 873,
+    "2": 888,
+    "3": 925,
+    "4": 990,
+    "5": 936,
+    "6": 823,
+    "7": 838,
+    "8": 806,
+    "9": 816,
+    "10": 837
+  },
+  "duration_seconds": {
+    "min": 0.05451700000000015,
+    "mean": 3.6079037445029782,
+    "median": 4.0,
+    "max": 4.000000000000014
+  }
+}
